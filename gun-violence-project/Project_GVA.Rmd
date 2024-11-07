@@ -1,0 +1,450 @@
+---
+title: "Project: Visualizing Gun Violence in the USA"
+subtitle: "DABN19"
+author: "William Nordansjö"
+date: "`r Sys.Date()`"
+papersize: a4
+geometry: margin=4cm
+colorlinks: true
+output:
+  pdf_document:
+    number_sections: true
+---
+
+```{r setup, include = FALSE}
+# Setup options for R Markdown
+knitr::opts_chunk$set(
+  echo       = FALSE,    # Do not print code
+  warning    = FALSE,    # Suppress warnings
+  message    = FALSE,    # Suppress messages
+  fig.align  = "center", # Center figures
+  fig.width  = 2.7,      # Good standard figure width for single-panel figures
+  fig.height = 2.4       # Good standard figure height for single-panel figures
+)
+
+
+library(tidyverse)
+library(janitor)
+library(patchwork)
+library(lubridate)
+library(RColorBrewer)
+library(viridis)
+library(sf)
+library(rnaturalearth)
+
+
+# Set a theme for ggplot2
+theme_set(theme_grey(base_size = 10))
+
+# Set options
+options(
+  digits = 3, # limit the number of significant digits
+  width  = 63 # limit the width of code output
+)
+```
+
+# Introduction {-}
+## Aims and structure {-}
+Gun violence is a issue that seems ever present, especially in the USA it is something that is constantly going on in the background, and every time it appears in media it is accompanied by a familiar jolt of anxiety. In order to get a understand this issue, this project will look at mass shooting incidents in the US over the years 2021 to 2023. This report aims to first discuss the nature of the shootings, examine when they happen and where they appear most frequently. Overall the goal is to get an broad overview of the plight that gun violence in the US is, in order to shed a light on a subject which we gladly look away from.
+
+## Data {-}
+The primary datasets used in this project are the Gun Violence Archive (GVA) and population data from the United States Census Bureau. The former is a non-profit independent organisation which aims to collect and archive gun violence incidents as they happen, sourced from a wide variety of sources such as law enforcement, media, commercial and from the government. They define a mass shooting as a shooting where more than one victim is involved. 
+
+The latter is an American governmental organisation with the mission of providing data about the countrys population and economy. The dataset used in this project contain estimated population on cities or towns and the states that they belong to. As the datasets use different definitions of cities, we are resigned to use states as the highest fidelity of administrative data. 
+
+
+```{r}
+
+GVA_data <- read_csv("GVA_data_0821-1024.csv")
+
+```
+
+
+```{r, data }
+pop_data <- readxl::read_excel("SUB-IP-EST2023-POP.xlsx")
+  
+```
+
+
+```{r, wrangling}
+
+GVA_data_cleaned <- GVA_data %>%
+  separate_wider_delim(
+    cols = `Incident Date`,
+    delim = ", ",
+    names = c("Incident Date", "Year")
+  ) %>%
+  filter(
+    !`Year` == "2024"
+  ) %>%
+  select(
+    !Operations
+  )
+
+pop_data_formatted <- pop_data %>%
+  slice(3:19493) %>%
+  row_to_names(row_number = 1) %>%
+  clean_names() %>%
+  rename(
+    Location = na,
+    Early_2020 = na_2,
+    "Late_2020" = x2020,
+    "2021" = x2021,
+    "2022" = x2022,
+    "2023" = x2023
+  ) %>%
+  select(
+    !c("Early_2020", "Late_2020")
+  ) 
+
+pop_data_seperated <- pop_data_formatted %>%
+  separate_wider_delim(
+    Location,
+    ", ",
+    names = c("City", "State"),
+    too_few = "debug",
+    too_many = "debug"
+  )
+
+pop_data_bugged <- pop_data_seperated %>%
+  filter(
+    Location_ok == FALSE
+  )
+
+pop_data_states_ok <- pop_data_seperated %>%
+  filter(
+    Location_ok == TRUE
+  ) %>%
+  select(
+    !c(Location, Location_ok, Location_pieces, Location_remainder)
+  )
+
+pop_data_cities_ok <- pop_data_states_ok %>%
+  mutate(
+    City = str_remove(City, "\\b(city|town)\\b")
+  )
+
+pop_data_tidy <- pop_data_cities_ok %>%
+  pivot_longer(
+    cols = c("2021", "2022", "2023"),
+    names_to = "Year",
+    values_to = "Population"
+  ) %>%
+  select(
+    !City
+  )
+
+pop_data_states <- pop_data_tidy %>%
+  group_by(State, Year) %>%
+  summarise(`State Population` = sum(Population)) %>%
+  ungroup()
+
+```
+
+# Analysis {-}
+## Analysis structure {-}
+This project will first try to explore the subject from the broadest possible perspective, then try to add additional dimensions such as location, time and by population size. These perspectives will be introduced in separate parts, with one central figure representing the subject from the given dimension.
+
+## Part 1: Overview and variable description {-}
+In order to get a deeper understanding of the data, some additional variables are created. These are "Number of Victims", which is a continuous variable of the sum of the victims killed and victims injured per incident. This enables us to also create "Mortality" variable or how many of the victims were killed expressed as a quota and finally a variable called "Outcome" which is a binary variables on whether or not the suspect was either killed or arrested (1) or not (0), with the possible outcomes: Definite (1) or Not Definite (0).
+
+With these new variables in hand, we can examine the phenomenon from a macro perspective by further computing the totals of the corresponding metrics. Figure 1 thus shows the staggering scale of the problem, as seen in the top left plot, there are over 1500 incidents during the three years examined which as seen in the top right corresponds to around 8000 victims. The mortality rate is further explored in the bottom left of the figure and while most of the shootings were not fatal, a lot of incidents had a mortality rate higher than 0. Perhaps the most frightening statistic found in this figure is however that in the majority of the incidents, there was no definitive outcome for the suspected shooter.
+
+
+```{r, code}
+
+GVA <- GVA_data_cleaned %>%
+  mutate(
+    `Number of Victims` = `Victims Killed` + `Victims Injured`,
+    Mortality = (`Victims Killed`/`Number of Victims`),
+     Outcome = if_else(`Suspects Killed` > 0 | `Suspects Arrested` > 0, 1, 0)
+  )
+
+
+GVA_summed <- GVA %>%
+  group_by() %>%
+  summarise(
+    `Total Incidents` = n(),
+    `Total Victims` = sum(`Number of Victims`),
+    `Total Killed` = sum(`Victims Killed`),
+    `Total Injured`= sum(`Victims Injured`),
+    `Average Mortality` = (`Total Killed`/`Total Victims`),
+    `Rate of Definite Outcomes` = mean(Outcome)
+  )
+
+GVA_summed_longer <- GVA_summed %>%
+  pivot_longer(
+    cols = c(`Total Incidents`, `Total Victims`, `Total Killed`, `Average Mortality`, `Rate of Definite Outcomes`, `Total Injured`),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+GVA_summed_longer_cont_v1 <- GVA_summed %>%
+  pivot_longer(
+    cols = c(`Total Killed`, `Total Injured`),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+GVA_summed_longer_cont_v2 <- GVA_summed %>%
+  pivot_longer(
+    cols = c(`Total Incidents`),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+GVA_outcome_data <- tibble(
+  Outcome = c("Definite", "Not Definite"),
+  Rate = c(0.4253165, 1 - 0.4253165)
+)
+
+
+```
+
+
+
+```{r, echo=FALSE, fig.width = 5.4, fig.height = 4.0, fig.cap = "Macro view descriptives: Top left is total incidents, top right show total victims. Bottom left show the mortality rate of individual incidents and bottom right shows rate of the suspects outcomes."}
+
+p1 <- GVA_summed_longer_cont_v2 %>%
+  ggplot(aes(x = Metric, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", show.legend = FALSE) + 
+  labs(x = " ")
+
+
+p2 <- GVA_summed_longer_cont_v1 %>%
+  ggplot(aes(x = "Total Victims", y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", show.legend = TRUE)  +
+  labs(x = " ", y = "Value")
+
+p3 <- GVA %>%
+  ggplot(aes(x = Mortality)) +
+  geom_histogram(bins = 7, fill = "#00BFC4") +
+  labs(x = "Mortality Rate", y = "Count")
+
+
+p4 <- GVA_outcome_data %>%
+  ggplot(aes(x = "", y = Rate, fill = Outcome)) +
+  geom_bar(stat = "identity", width = 1) +
+  labs(x = "Incidents") 
+
+  
+(p1 | p2) / (p3 | p4)
+  
+
+```
+
+
+## Part 2: Temporal aspect {-}
+
+If we were to add a time perspective, the most interesting things would be: Is there a difference between the years 2021, 2022 and 2023, furthermore is there some form of seasonal trend that we can identify? Bound as we are by data, and the Gun Violence Archive only supplying data from the middle of 2021, we do not have sufficient data coverage to do a vis-a-vis viz between all years directly. Instead figure 2 plots the weekly total number of incidents per year as well as the cumulative amount of incidents during the year. 
+
+Upon inspecting the figure, we can immediately discern that there does not seem to be any difference of note, either between or during the years. The only seasonal trend visible is the drop off at the end of the year and sudden jump at the start of the year, and despite the potential peaceful influence of the holidays, this is most probable attributed to a decrease of administrative activities during this period.
+
+
+```{r, Lubridate wrangling, and regular wrangling}
+
+GVA_yday <- GVA %>%
+  mutate(
+    yday = yday(mdy(paste(`Incident Date`, Year))),
+    week = week(mdy(paste(`Incident Date`, Year)))
+  )
+
+GVA_weekly <- GVA_yday %>%
+  group_by(Year, week) %>%
+  summarise(Incidents_per_week = n(), .groups = "drop") %>%
+  complete(week = 1:53, fill = list(Incidents_per_week = 0))
+
+GVA_weekly_cumulative <- GVA_weekly %>%
+  group_by(Year) %>%
+  mutate(Cumulative_Incidents = cumsum(Incidents_per_week))
+
+```
+
+```{r, echo = FALSE, fig.width = 5.4, fig.height = 4.0, fig.cap = "Number of incidents over the years, dashed lines are weekly totals and solid are cumulative incidents. Note the logarithmic scale of the y-axis."}
+
+p6 <- GVA_weekly_cumulative %>%
+  ggplot(aes(x = week, y = Cumulative_Incidents, color = Year, group = Year)) +
+  geom_line(size = 1) +
+  geom_line(aes(y = Incidents_per_week), linetype = "dashed", linewidth = 1, alpha = 0.6) +
+  labs(y = "Number of Incidents", x = " ") +
+  scale_x_continuous(breaks = c(1, 13, 26, 39, 52), labels = c("Week 1", "Week 13", "Week 26", "Week 39", "Week 52")) +
+  theme(legend.position = "right") +
+  scale_y_log10()
+
+p6
+
+```
+
+
+
+## Part 3: Statewise in nominal values{-}
+
+As previously stated, this project is focused entirely on data of the USA which as a federation is made up of different states. These states functions in some aspects as their own countries and have their own characteristics, such as independent laws, it is therefore meaningful to examine the difference between the states in terms of shootings. One of the main characteristics of the different states is their population size, which could be assumed to be associated with shooting incidents since it is defined as an event consisting of at least three people (remembering that the Gun Violence Archive from whence the data is sourced defines a mass shooting as a incident with more than one victim). Looking at nominal values is thus problematic but arguably also very important, since it shows the scale of the problem and since each data point is a potentially life-changing event for the people involved, summarizing the data is problematic in its own way. Mortality rate and average suspect outcome should not be as affected by population as incidents is however.
+
+```{r, Summarise data on states}
+
+GVA_summed_states <- GVA %>%
+  group_by(State) %>%
+  summarise(
+    `Total Incidents` = n(),
+    `Total Victims` = sum(`Number of Victims`),
+    `Total Killed` = sum(`Victims Killed`),
+    `Total Injured`= sum(`Victims Injured`),
+    `Average Mortality` = (`Total Killed`/`Total Victims`),
+    `Rate of Definite Outcomes` = mean(Outcome)
+  )
+
+top_20_states_incidents <- GVA_summed_states %>%
+  arrange(desc(`Total Incidents`)) %>%
+  slice_head(n = 20) %>%
+  select(
+    !c(`Average Mortality`)
+  ) 
+
+GVA_states_stacked <- GVA_summed_states %>%
+  select(
+    c(State, `Total Victims`, `Total Killed`, `Total Injured`)
+  ) 
+
+top_20_states_victims <- GVA_states_stacked %>%
+  arrange(desc(`Total Victims`)) %>%
+  slice_head(n = 20) %>%
+  select(
+    !c(`Total Victims`)
+  ) %>%
+  rename(
+    "Killed" = `Total Killed`,
+    "Injured" = `Total Injured`
+  )
+
+
+GVA_states_stacked_longer <- top_20_states_victims %>%
+  pivot_longer(cols = c(`Killed`, `Injured`), 
+               names_to = "Victim Outcome", 
+               values_to = "Total")
+
+
+```
+
+
+```{r, echo = FALSE, fig.width = 5.9, fig.height = 5.0, fig.cap = "Statewise nominal data, top plot is the top 20 states in terms of number of incidents, with rate of definitive suspect outcome determining the intensity of the colors. Bottom plot shows total number of killed and injured on the top 20 states ordered on total victims."}
+
+p_s_incident <- top_20_states_incidents %>%
+  ggplot(aes(x = reorder(`State`, -`Total Incidents`, sum), y = `Total Incidents`)) +
+  geom_bar(stat = "identity", aes(fill = `Rate of Definite Outcomes`)) +
+  labs(x = " ",
+       y = "Incidents",
+       fill = "Rate of Definite\nSuspect Outcomes") +
+  theme(
+    axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)
+  ) +
+  scale_fill_viridis_c(option = "viridis", direction = -1)
+
+
+p_s_victims <- GVA_states_stacked_longer %>%
+  ggplot(aes(x = reorder(`State`, -`Total`, sum), y = Total, fill = `Victim Outcome`)) +
+  geom_bar(stat = "identity") +
+  labs(x = "",
+       y = "Victims") +
+  theme(
+    axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1),
+    legend.position = c(1.1800, 0.5)
+  )
+
+p_s_incident/p_s_victims
+
+```
+
+The two plots which make up figure 3 are bar plots of the top 20 states arranged in nominal data, total incidents and total victims respectively. And rather unsurprisingly they both feature some of the largest states in the country by population size, with only a slight variation of which were included and in which order. The metrics Incidents, and Victims could be seen as almost analogous, but the difference between them enables us to add additional perspectives on the data.
+The top plot also adds the rate of definite suspect outcomes per incident, and interestingly this variable does not seem to be completely associated with population size as it seems to vary across the top 20 states. It also points out the fact that Illinois which has the largest amount of incidents, also has a low rate of definite outcomes for the suspected shooters. The bottom plot, by dividing the bars into the victim outcomes: injured and killed, also gives us a proxy variable for mortality rate. And this seems to be rather consistent across the states, with some exceptions of relatively higher mortality in Texas and lower in New York. 
+
+## Part 4: On the map {-}
+The result that the largest states had the most amount of shootings is perhaps not a surprising one. And especially when visualizing a problem on a map, you end up visualizing population density. Therefore we will examining the shootings scaled by population size and in this case per 1 000 000 inhabitants, this should give a fairer view of the problem. 
+
+
+```{r, adapt the data to maps}
+
+pop_data_avg <- pop_data_states %>%
+  group_by(State) %>%
+  summarise(
+    `Average Population` = mean(`State Population`)
+  )
+
+GVA_summed_states_pop <- left_join(
+  GVA_summed_states,
+  pop_data_avg,
+  by = c("State" = "State")
+)
+
+GVA_summed_states_pc <- GVA_summed_states_pop %>%
+  mutate(
+    `Incidents per Million` = (`Total Incidents` / `Average Population`) * 10^6,
+    `Victims per Million` = (`Total Victims` / `Average Population`) * 10^6,
+    `Killed per Million` = (`Total Killed` / `Average Population`) * 10^6,
+    `Injured per Million` = (`Total Injured` / `Average Population`) * 10^6,
+  )
+
+us_states <- ne_states(iso_a2 = "us", returnclass = "sf") %>%
+  filter(!(postal %in% c("AK", "HI")))
+
+GVA_map <- left_join(
+  us_states,
+  GVA_summed_states_pc,
+  by = c("name" = "State")
+)
+
+GVA_summed_states_pc_top5 <- GVA_summed_states_pc %>%
+  arrange(desc(`Victims per Million`)) %>%
+  slice_head(n = 5) %>%
+  select(
+    c(State,
+      "Victims" = `Victims per Million`,
+      "Killed" = `Killed per Million`,
+      "Injured "= `Injured per Million`,
+      "Incidents" = `Incidents per Million`))
+
+knitr::kable((GVA_summed_states_pc_top5), caption = "Top 5 states in terms of number of victims scaled by population density (with numbers in per million inhabitants)")
+
+```
+
+Table 1 shows the result of our scaling, and features the top 5 states in terms of population scaled victims. As hypothesized above, this presents an entirely different roster from the previous part, with considerably smaller states.
+
+
+```{r, echo = FALSE, fig.width = 6.4, fig.height = 4.0, fig.cap = "Choropleth of the contiguous United States, with color intensity showing victims per million inhabitants. Grey states indicates missing data."}
+
+
+p8 <- GVA_map %>%
+  ggplot(aes(fill = `Victims per Million`)) +
+  geom_sf(col = "white") +
+  scale_fill_distiller(direction = 1, palette = "Reds") +
+  labs(fill = "Victims\nper Million\nInhabitants") +
+  theme_void() + 
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12) 
+  )
+
+p8
+
+```
+
+Figure 4 shows the geographical distribution of gun violence across the contiguous United States, with each state colored by how many victims per million inhabitants there were during the three years considered. The maps shows that the states with the most scaled Victims are located in the southern and eastern US, while the northern and western parts of the country is less affected. This is again indicative of the close relation with population density as the north and northwestern parts of the US generally is more sparsely populated in relation to the east.
+
+# Conclusion {-}
+Gun violence is a sensitive and multi-faceted subject, and one thing that has to be kept in mind is that every one of these data points are tragedies in their own right. A conclusion that can be drawn from the project is that gun violence is the rather simple connection between population density and incidents, suggesting that when the option exist, people settle their differences using any available means. This project has attempted to gain some understanding of the staggering scope of the issue and give a fair account of those affected. A point of future improvement could be to add data on things such as weapon legislation, or amount of guns that are present in each state.
+
+\newpage
+
+# Appendix {-}
+## Data sources {-}
+
+Gun Violence Archive: "Mass shootings",
+Link: 
+https://www.gunviolencearchive.org/mass-shooting #Accessed and downloaded 20241019
+
+United States Census Bureau: "City and Town Population Totals: 2020-2023",
+Link:
+https://www.census.gov/data/tables/time-series/demo/popest/2020s-total-cities-and-towns.html #Accessed and downloaded 20241019
+
+## Statement of AI usage {-}
+AI has been used as a tool to quickly explore ideas and give rough sketches, it has also been used to debug code and aid in troubleshooting. All text and visualizations are my own work.
